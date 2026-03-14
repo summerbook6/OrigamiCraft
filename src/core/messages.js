@@ -1,0 +1,15 @@
+export const MSG = Object.freeze({
+  APP_MODE_CHANGED: "app/mode-changed",
+  APP_RESET_FOLD: "app/reset-fold",
+  INPUT_POINTER_DOWN: "input/pointer-down",
+  INPUT_POINTER_MOVE: "input/pointer-move",
+  INPUT_POINTER_UP: "input/pointer-up",
+  INPUT_WHEEL: "input/wheel",
+  PAPER_POSE_COMMAND: "paper/pose-command",
+  PAPER_POSE_CHANGED: "paper/pose-changed",
+  PAPER_SHAPE_COMMAND: "paper/shape-command",
+  PAPER_FOLD_COMMITTED: "paper/fold-committed",
+  AIRPLANE_EVAL_UPDATED: "airplane/eval-updated",
+  AIRPLANE_COMPLETED: "airplane/completed",
+  UI_SET_HINT: "ui/set-hint",
+});

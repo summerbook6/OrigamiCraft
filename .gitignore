@@ -1,0 +1,6 @@
+node_modules/
+.DS_Store
+.cursor/
+terminals/
+agent-transcripts/
+*.log
