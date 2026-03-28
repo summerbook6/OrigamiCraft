@@ -19,6 +19,7 @@ const controlHint = document.getElementById("controlHint");
 const btnUndo = document.getElementById("btnUndo");
 const btnFlip = document.getElementById("btnFlip");
 const btnStand = document.getElementById("btnStand");
+const btnSpread = document.getElementById("btnSpread");
 
 const bus = new MessageBus();
 const sceneSystem = new SceneSystem({ canvas });
@@ -92,6 +93,13 @@ window.addEventListener("keydown", onKeyDown);
 btnUndo?.addEventListener("click", onUndoClick);
 btnFlip?.addEventListener("click", onFlipClick);
 btnStand?.addEventListener("click", onStandClick);
+btnSpread?.addEventListener("click", onSpreadClick);
+
+bus.subscribe(MSG.AIRPLANE_COMPLETED, () => {
+  if (btnSpread) {
+    btnSpread.style.display = "inline-block";
+  }
+});
 
 let _animFrameId;
 animate();
@@ -188,6 +196,14 @@ function onKeyDown(ev) {
 function onUndoClick() {
   markUserInteraction();
   bus.publish(MSG.APP_RESET_FOLD);
+}
+
+function onSpreadClick() {
+  markUserInteraction();
+  bus.publish(MSG.PAPER_SHAPE_COMMAND, { action: "wing-spread" });
+  if (btnSpread) {
+    btnSpread.style.display = "none";
+  }
 }
 
 function onFlipClick() {
