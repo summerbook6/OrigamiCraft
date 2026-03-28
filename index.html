@@ -13,6 +13,9 @@
     <link rel="stylesheet" href="./styles.css" />
   </head>
   <body>
+  <!-- GPUMath Canvas for parallel physics computation -->
+  <canvas id="gpuMathCanvas" style="display:none;"></canvas>
+
     <div id="app">
       <span id="hint" class="is-hidden"></span>
       <div id="controlHint" aria-label="조작 가이드">
@@ -52,6 +55,6 @@
       <canvas id="scene"></canvas>
     </div>
 
-    <script type="module" src="./app.js"></script>
+    <script type="module" src="./app.js?v=30"></script>
   </body>
 </html>

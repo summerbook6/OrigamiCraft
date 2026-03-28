@@ -1,6 +1,18 @@
 import { MessageBus } from "./core/messageBus.js";
 import { MSG } from "./core/messages.js";
 import { THREE } from "./lib/three.js";
+
+const OriginalMesh = THREE.Mesh;
+THREE.Mesh = function(geometry, material) {
+    if (geometry === null) {
+        console.error("CREATED MESH WITH NULL GEOMETRY!", new Error().stack);
+    } else if (geometry === undefined) {
+        console.error("CREATED MESH WITH UNDEFINED GEOMETRY!", new Error().stack);
+    }
+    return new OriginalMesh(geometry, material);
+};
+THREE.Mesh.prototype = Object.create(OriginalMesh.prototype);
+THREE.Mesh.prototype.constructor = THREE.Mesh;
 import { CameraOrbitController } from "./modules/cameraOrbitController.js";
 import { PaperSimulator } from "./modules/paperSimulator.js";
 import { PaperPoseController } from "./modules/paperPoseController.js";
@@ -23,29 +35,24 @@ const btnStand = document.getElementById("btnStand");
 const bus = new MessageBus();
 const sceneSystem = new SceneSystem({ canvas });
 window.app = { sceneSystem };
-
 const cameraOrbit = new CameraOrbitController({
   camera: sceneSystem.camera,
   bus,
 });
-window.app.cameraOrbit = cameraOrbit;
-
 const paperSimulator = new PaperSimulator({
   scene: sceneSystem.scene,
   camera: sceneSystem.camera,
   canvas,
   bus,
 });
-window.app.paperSimulator = paperSimulator;
-
+console.warn("PaperSimulator created!");
 const paperPose = new PaperPoseController({
   paperGroup: paperSimulator.getPaperGroup(),
   bus,
 });
-window.app.paperPose = paperPose;
-
+console.warn("PaperPoseController created!");
 new FoldHistoryManager({ bus });
-
+console.warn("FoldHistoryManager created!");
 new AirplaneEvaluator({
   bus,
   paperSize: {
@@ -53,7 +60,7 @@ new AirplaneEvaluator({
     height: paperSimulator.paper.height,
   },
 });
-
+console.warn("AirplaneEvaluator created!");
 const clock = new THREE.Clock();
 
 let mode = "draw";
@@ -93,19 +100,52 @@ btnUndo?.addEventListener("click", onUndoClick);
 btnFlip?.addEventListener("click", onFlipClick);
 btnStand?.addEventListener("click", onStandClick);
 
-let _animFrameId;
 animate();
 
+let _animFrameId;
 function animate() {
-  if (_animFrameId) cancelAnimationFrame(_animFrameId);
-  _animFrameId = requestAnimationFrame(animate);
+  clearTimeout(_animFrameId);
+  _animFrameId = setTimeout(animate, 1000 / 60);
   const dt = Math.min(clock.getDelta(), 0.05);
   sceneSystem.tick(dt);
   cameraOrbit.tick(dt);
   paperPose.tick(dt);
   paperSimulator.tick();
   
-  sceneSystem.renderer.render(sceneSystem.scene, sceneSystem.camera);
+  try {
+    sceneSystem.scene.traverse((obj) => {
+      if (obj.isMesh || obj.isLine || obj.isPoints) {
+        if (!obj.geometry) {
+          console.error("OBJECT WITH NO GEOMETRY:", obj);
+        }
+      }
+    });
+    
+    if (!window._myDebugCounter) window._myDebugCounter = 0;
+    if (window._myDebugCounter < 2) {
+        window._myDebugCounter++;
+        console.warn("SCENE DEBUG: scene exists");
+        const pMesh = paperSimulator.physicsMesh;
+        if (pMesh) {
+            console.warn("PhysicsMesh pos length:", pMesh.geometry.attributes.position.array.length);
+            console.warn("PhysicsMesh pos first few:", Array.from(pMesh.geometry.attributes.position.array).slice(0, 6));
+            console.warn("PhysicsMesh indices:", Array.from(pMesh.geometry.index.array));
+            console.warn("PhysicsMesh bounding sphere:", pMesh.geometry.boundingSphere);
+            console.warn("PhysicsMesh visible:", pMesh.visible);
+            console.warn("PhysicsMesh material:", pMesh.material);
+        }
+    }
+    
+    sceneSystem.renderer.render(sceneSystem.scene, sceneSystem.camera);
+  } catch (err) {
+    console.error("Render error:", err);
+    sceneSystem.scene.traverse((obj) => {
+      if (obj.isMesh && !obj.geometry) {
+        console.error("Mesh with null geometry:", obj);
+      }
+    });
+    throw err;
+  }
 }
 
 function setMode(nextMode) {

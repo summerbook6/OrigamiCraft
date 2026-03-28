@@ -62,7 +62,7 @@ function lineSideValue(point, p0, p1) {
 
 export function clipConvexPolygonWithLine(poly, p0, p1, keepPositive) {
   const out = [];
-  const eps = 1e-7;
+  const eps = 1e-4; // Increased epsilon from 1e-7 to 1e-4 to prevent floating point slivers
 
   for (let i = 0; i < poly.length; i += 1) {
     const current = poly[i];
@@ -88,20 +88,28 @@ export function clipConvexPolygonWithLine(poly, p0, p1, keepPositive) {
     }
   }
 
-  return dedupeNearPoints(out, 1e-6);
+  return dedupeNearPoints(out, 1e-4);
 }
 
-function segmentLineIntersection(a, b, p0, p1) {
-  const r = new THREE.Vector2().subVectors(b, a);
-  const s = new THREE.Vector2().subVectors(p1, p0);
-  const denom = cross2(r, s);
-  if (Math.abs(denom) < 1e-8) return null;
+function segmentLineIntersection(current, next, p0, p1) {
+  // 선분 (current -> next)과 직선 (p0 -> p1)의 교차점
+  const dx1 = next.x - current.x;
+  const dy1 = next.y - current.y;
+  const dx2 = p1.x - p0.x;
+  const dy2 = p1.y - p0.y;
 
-  const qp = new THREE.Vector2().subVectors(p0, a);
-  const t = cross2(qp, s) / denom;
-  if (t < -1e-6 || t > 1 + 1e-6) return null;
+  const denom = dx1 * dy2 - dy1 * dx2;
+  if (Math.abs(denom) < 1e-8) return null; // 평행
 
-  return new THREE.Vector2(a.x + r.x * t, a.y + r.y * t);
+  const dx3 = p0.x - current.x;
+  const dy3 = p0.y - current.y;
+
+  const t = (dx3 * dy2 - dy3 * dx2) / denom;
+  
+  // 교차점이 선분(current-next) 위에 있는지 확인 (여유값 허용)
+  if (t < -1e-4 || t > 1 + 1e-4) return null;
+
+  return new THREE.Vector2(current.x + dx1 * t, current.y + dy1 * t);
 }
 
 function cross2(v1, v2) {
@@ -113,9 +121,9 @@ function dedupeNearPoints(points, eps) {
   const out = [];
   for (const p of points) {
     const prev = out[out.length - 1];
-    if (!prev || prev.distanceToSquared(p) > eps * eps) out.push(p);
+    if (!prev || prev.distanceTo(p) > eps) out.push(p);
   }
-  if (out.length > 2 && out[0].distanceToSquared(out[out.length - 1]) <= eps * eps) {
+  if (out.length > 2 && out[0].distanceTo(out[out.length - 1]) <= eps) {
     out.pop();
   }
   return out;

@@ -6,6 +6,8 @@ import {
   getRectPolygon,
   polygonToGeometry,
 } from "./geometry.js";
+import { buildFoldObjectFromLayers } from "./foldBuilder.js";
+import { generateCreaseParams } from "./creasePattern.js";
 
 export class PaperSimulator {
   constructor({ scene, camera, canvas, bus }) {
@@ -25,7 +27,6 @@ export class PaperSimulator {
       creaseP1: new THREE.Vector2(0.7, 0.5),
       hasUserCrease: false,
       creaseColor: 0x2f66ff,
-      foldAngleDeg: 0,
       foldTargetAngleDeg: 0,
       movingSide: "positive",
       activeTargetLayerId: null,
@@ -84,7 +85,6 @@ export class PaperSimulator {
 
     this.renderMeshes = [];
     this.renderEdges = [];
-    this.pickMeshes = [];
     this.creaseLine = null;
     this.drawPreviewLine = null;
     this.guideVerticalLine = null;
@@ -117,14 +117,13 @@ export class PaperSimulator {
   }
 
   onResetFold() {
-    this.paper.foldAngleDeg = 0;
     this.paper.foldTargetAngleDeg = 0;
     this.paper.activeTargetLayerId = null;
     this.paper.activeTargetLayerIds = null;
     this.interaction.selectedLayerId = null;
     this.interaction.selectedLayerIds = null;
     this.interaction.selectedSide = null;
-    this.applyFoldTransform();
+    this.createPaperMeshes();
     this.updateGuideVisibility();
     this.bus.publish(MSG.UI_SET_HINT, { text: "각도를 초기화했습니다." });
   }
@@ -189,16 +188,33 @@ export class PaperSimulator {
       return;
     }
 
-    // 이미 접힌 상태에서는 접히는 면 기준을 고정해, 우클릭 순간 반전되는 점프를 방지합니다.
-    const sideForDrag =
-      Math.abs(this.paper.foldTargetAngleDeg) > 3 ? this.paper.movingSide : hit.side;
+    // 이미 접힌 상태에서 다른 면을 잡으면 기준을 반전시켜 자연스럽게 이어지도록 합니다.
+    const sideForDrag = hit.side;
+    let sideSwapped = false;
+    if (this.paper.movingSide && this.paper.movingSide !== sideForDrag && Math.abs(this.paper.foldTargetAngleDeg) > 1) {
+      this.paper.foldTargetAngleDeg = -this.paper.foldTargetAngleDeg;
+      sideSwapped = true;
+    }
+    
     const targetLayerIds = hit.layerIds?.length ? hit.layerIds : [hit.layerId];
+    
+    // Check if we are re-dragging the same fold and on the same side
+    const isRedrag = this.paper.hasUserCrease && 
+                     this.interaction.selectedLayerId === hit.layerId &&
+                     this.interaction.selectedSide === sideForDrag;
+                     
     this.interaction.selectedLayerId = hit.layerId;
     this.interaction.selectedLayerIds = targetLayerIds.slice();
     this.interaction.selectedSide = sideForDrag;
     this.paper.activeTargetLayerId = hit.layerId;
     this.paper.activeTargetLayerIds = targetLayerIds.slice();
-    const foldInit = this.beginFoldDrag(sideForDrag, hit.localPoint, targetLayerIds);
+    
+    if (sideSwapped) {
+        this.paper.movingSide = sideForDrag;
+        this.createPaperMeshes();
+    }
+    
+    const foldInit = this.beginFoldDrag(sideForDrag, hit.localPoint, targetLayerIds, isRedrag);
     this.interaction.foldStartAngle = foldInit.startAngle;
     this.interaction.foldAllowedSign = foldInit.allowedSign;
     this.interaction.foldDragStartClientX = clientX;
@@ -275,7 +291,7 @@ export class PaperSimulator {
       if (!this.interaction.foldMoved) {
         this.paper.activeTargetLayerId = null;
         this.paper.activeTargetLayerIds = null;
-        this.applyFoldTransform();
+        this.createPaperMeshes();
         this.bus.publish(MSG.UI_SET_HINT, {
           text: "우클릭 후 접을 방향으로 드래그해 주세요.",
         });
@@ -286,10 +302,10 @@ export class PaperSimulator {
       }
     }
 
-    this.cancelPrimaryPointer();
+    this.cancelDragState();
   }
 
-  cancelPrimaryPointer() {
+  cancelDragState() {
     this.interaction.pointerDown = false;
     this.interaction.activePointerId = null;
     this.interaction.dragKind = null;
@@ -297,10 +313,14 @@ export class PaperSimulator {
     this.interaction.drawEnd = null;
     this.interaction.foldDragging = false;
     this.interaction.foldMoved = false;
+    this.clearDrawPreview();
+  }
+
+  cancelPrimaryPointer() {
+    this.cancelDragState();
     this.interaction.selectedLayerId = null;
     this.interaction.selectedLayerIds = null;
     this.interaction.selectedSide = null;
-    this.clearDrawPreview();
   }
 
   pointerToNdc(clientX, clientY) {
@@ -346,7 +366,7 @@ export class PaperSimulator {
     this.pointerToNdc(clientX, clientY);
     this.raycaster.setFromCamera(this.pointerNdc, this.camera);
 
-    const candidates = this.pickMeshes.filter(Boolean);
+    const candidates = this.renderMeshes.filter(Boolean);
     const hits = this.raycaster.intersectObjects(candidates, false);
     if (hits.length === 0) return null;
 
@@ -368,12 +388,12 @@ export class PaperSimulator {
   pickConnectedLayerPacket(seedLayerId, targetSide) {
     const seedLayer = this.layers.find((layer) => layer.id === seedLayerId);
     if (!seedLayer) return [];
-    if (!this.layerSupportsTargetSide(seedLayer.poly, targetSide)) {
+    if (!this.layerSupportsTargetSide(seedLayer, targetSide)) {
       return [seedLayerId];
     }
 
     const eligibleLayers = this.layers.filter((layer) =>
-      this.layerSupportsTargetSide(layer.poly, targetSide)
+      this.layerSupportsTargetSide(layer, targetSide)
     );
     const byId = new Map(eligibleLayers.map((layer) => [layer.id, layer]));
     if (!byId.has(seedLayerId)) return [seedLayerId];
@@ -395,10 +415,9 @@ export class PaperSimulator {
     return Array.from(visited);
   }
 
-  layerSupportsTargetSide(poly, targetSide) {
-    const onPositive = clipConvexPolygonWithLine(poly, this.paper.creaseP0, this.paper.creaseP1, true);
-    const onNegative = clipConvexPolygonWithLine(poly, this.paper.creaseP0, this.paper.creaseP1, false);
-    const active = targetSide === "positive" ? onPositive : onNegative;
+  layerSupportsTargetSide(layer, targetSide) {
+    const { posPoly, negPoly } = this.getSplitPolys(layer, this.paper.creaseP0, this.paper.creaseP1);
+    const active = targetSide === "positive" ? posPoly : negPoly;
     return active.length >= 3 && polygonAreaAbs(active) > 1e-7;
   }
 
@@ -467,7 +486,6 @@ export class PaperSimulator {
         this.commitCurrentFoldToLayers();
       } else {
         this.paper.hasUserCrease = false;
-        this.paper.foldAngleDeg = 0;
         this.paper.foldTargetAngleDeg = 0;
         this.paper.activeTargetLayerId = null;
         this.paper.activeTargetLayerIds = null;
@@ -492,7 +510,7 @@ export class PaperSimulator {
     return { ok: true, snappedGuide: snapped.snappedGuide, tooShortForDrag: false };
   }
 
-  beginFoldDrag(side, localPoint, layerIds = null) {
+  beginFoldDrag(side, localPoint, layerIds = null, isRedrag = false) {
     this.paper.movingSide = side;
     // 이미 접힌 상태에서는 현재 접힘 부호를 유지해야 자연스럽게 다시 펼칠 수 있습니다.
     const currentSign = Math.sign(this.paper.foldTargetAngleDeg);
@@ -512,8 +530,14 @@ export class PaperSimulator {
       allowedSign
     );
     this.paper.foldTargetAngleDeg = startAngle;
-    this.paper.foldAngleDeg = startAngle;
-    this.applyFoldTransform();
+    
+    // Only rebuild the model if this is a new fold, not a continuation of the same fold
+    if (!isRedrag) {
+        this.createPaperMeshes();
+    } else {
+        // Just make sure the target angle matches current state to avoid jumps
+        this.updateMeshesTransform();
+    }
 
     return {
       startAngle,
@@ -542,7 +566,7 @@ export class PaperSimulator {
 
     // 허용된 접힘 방향(allowedSign)을 각도 변화에 반영합니다.
     const nextAngle = THREE.MathUtils.clamp(
-      startAngle + signedCurved * 75 * allowedSign,
+      startAngle + signedCurved * 120 * allowedSign, // 75에서 120으로 증가시켜 마우스 움직임에 대한 반응성 향상
       this.foldLimits.minAngle,
       this.foldLimits.maxAngle
     );
@@ -553,28 +577,45 @@ export class PaperSimulator {
 
     // 드래그 중에는 목표 추종이 아닌 즉시 반영으로 왕복 진동을 원천 차단합니다.
     this.paper.foldTargetAngleDeg = clampedAngle;
-    this.paper.foldAngleDeg = clampedAngle;
-    this.applyFoldTransform();
+    
+    if (this.interaction.selectedLayerId) {
+      this.updateMeshesTransform();
+    }
   }
 
   tick() {
-    if (this.interaction.foldDragging) return;
+    if (this.interaction.autoSettling) {
+      let maxSettlingAngle = 179.2;
+      let snapStartAngle = 145;
 
-    const angleDiff = this.paper.foldTargetAngleDeg - this.paper.foldAngleDeg;
-    if (Math.abs(angleDiff) > 0.01) {
-      this.paper.foldAngleDeg += angleDiff * this.foldLimits.smoothFactor;
-      this.applyFoldTransform();
-      return;
+      if (Math.abs(this.paper.foldTargetAngleDeg) > snapStartAngle) {
+        const sign = Math.sign(this.paper.foldTargetAngleDeg);
+        const target = maxSettlingAngle * sign;
+        this.paper.foldTargetAngleDeg += (target - this.paper.foldTargetAngleDeg) * 0.15;
+        
+        if (Math.abs(this.paper.foldTargetAngleDeg) > maxSettlingAngle - 0.5) {
+          this.paper.foldTargetAngleDeg = maxSettlingAngle * sign;
+          this.interaction.autoSettling = false;
+        }
+        
+        if (this.interaction.selectedLayerId) {
+          this.updateMeshesTransform();
+        }
+      } else if (Math.abs(this.paper.foldTargetAngleDeg) < 3.0) {
+        this.paper.foldTargetAngleDeg += (0 - this.paper.foldTargetAngleDeg) * 0.15;
+        if (Math.abs(this.paper.foldTargetAngleDeg) < 0.5) {
+          this.paper.foldTargetAngleDeg = 0;
+          this.interaction.autoSettling = false;
+        }
+        
+        if (this.interaction.selectedLayerId) {
+          this.updateMeshesTransform();
+        }
+      } else {
+          this.interaction.autoSettling = false;
+      }
     }
-    if (this.paper.foldAngleDeg !== this.paper.foldTargetAngleDeg) {
-      this.paper.foldAngleDeg = this.paper.foldTargetAngleDeg;
-      this.applyFoldTransform();
-    }
-    if (this.interaction.autoSettling && Math.abs(angleDiff) <= 0.2) {
-      this.paper.foldAngleDeg = this.paper.foldTargetAngleDeg;
-      this.applyFoldTransform();
-      this.interaction.autoSettling = false;
-    }
+
     this.updateGuideGlow();
     this.updateGuideVisibility();
   }
@@ -779,6 +820,45 @@ export class PaperSimulator {
     return { start: bestA, end: bestB };
   }
 
+
+  updateMeshesTransform() {
+    if (!this.renderMeshes) return;
+    
+    let activeOpMat = new THREE.Matrix4();
+    if (this.paper.hasUserCrease) {
+        const op = {
+            creaseP0: this.paper.creaseP0,
+            creaseP1: this.paper.creaseP1,
+            movingSide: this.paper.movingSide,
+            targetAngleDeg: this.paper.foldTargetAngleDeg
+        };
+        activeOpMat = this.getFoldMatrix(op);
+    }
+    
+    const seamLift = 0.00012;
+
+    for (const mesh of this.renderMeshes) {
+      if (!mesh) continue;
+      
+      const layerIndex = this.layers.findIndex(l => l.id === mesh.userData.layerId);
+      const zLift = layerIndex >= 0 ? layerIndex * this.layerGap : 0;
+      
+      // Calculate active transform if this part is moving
+      const finalMat = new THREE.Matrix4();
+      if (mesh.userData.isMoving && this.paper.hasUserCrease) {
+          finalMat.multiplyMatrices(activeOpMat, mesh.userData.baseMatrix);
+      } else {
+          finalMat.copy(mesh.userData.baseMatrix);
+      }
+      
+      // Apply Z lift on top of the transformed coordinates
+      const zMat = new THREE.Matrix4().makeTranslation(0, 0, zLift + (mesh.userData.isMoving ? seamLift : 0));
+      mesh.matrix.multiplyMatrices(zMat, finalMat);
+      mesh.matrixWorldNeedsUpdate = true;
+    }
+  }
+
+
   createPaperMeshes() {
     this.disposePaperMeshes();
 
@@ -788,23 +868,8 @@ export class PaperSimulator {
       this.paper.creaseP1.set(0.7, 0.5);
     }
 
-    this.pickMeshes = [];
     this.renderMeshes = [];
     this.renderEdges = [];
-
-    const axis = new THREE.Vector3(
-      this.paper.creaseP1.x - this.paper.creaseP0.x,
-      this.paper.creaseP1.y - this.paper.creaseP0.y,
-      0
-    ).normalize();
-    const sideSign = this.paper.movingSide === "positive" ? 1 : -1;
-    const signedAngle = THREE.MathUtils.degToRad(this.paper.foldAngleDeg * sideSign);
-    const rot = new THREE.Matrix4().makeRotationAxis(axis, signedAngle);
-    const t1 = new THREE.Matrix4().makeTranslation(-this.paper.creaseP0.x, -this.paper.creaseP0.y, 0);
-    const t2 = new THREE.Matrix4().makeTranslation(this.paper.creaseP0.x, this.paper.creaseP0.y, 0);
-    const foldMatrix = new THREE.Matrix4().multiplyMatrices(t2, rot).multiply(t1);
-    // 같은 레이어 내부(static/moving) seam 틈이 과하게 보이지 않도록 미세 분리만 유지합니다.
-    const seamLift = 0.00012;
 
     const previewTargetLayerIds = this.paper.hasUserCrease
       ? new Set(this.getActiveTargetLayerIds())
@@ -814,7 +879,7 @@ export class PaperSimulator {
       const layer = this.layers[i];
       const poly = layer.poly;
       const layerId = layer.id;
-      const zLift = i * this.layerGap;
+      const baseMat = this.getBaseMatrixForLayer(layer);
 
       if (
         !this.paper.hasUserCrease ||
@@ -826,28 +891,17 @@ export class PaperSimulator {
           polygonToGeometry(poly, this.paper.width, this.paper.height),
           this.paper.baseMaterial
         );
-        // 분할되지 않은 단일 면은 side 판정을 픽업 단계에서 계산합니다.
         mesh.userData.side = null;
         mesh.userData.layerId = layerId;
-        mesh.castShadow = true;
-        mesh.receiveShadow = false;
-        mesh.position.z = zLift;
+        mesh.userData.isMoving = false;
+        mesh.userData.baseMatrix = baseMat;
+        mesh.matrixAutoUpdate = false;
         this.paperGroup.add(mesh);
         this.renderMeshes.push(mesh);
-        this.pickMeshes.push(mesh);
-
-        const edge = makeBoundaryEdgeFromPolygons([poly], {
-          zOffset: 0.001 + zLift,
-        });
-        if (edge) {
-          this.paperGroup.add(edge);
-          this.renderEdges.push(edge);
-        }
         continue;
       }
 
-      const posPoly = clipConvexPolygonWithLine(poly, this.paper.creaseP0, this.paper.creaseP1, true);
-      const negPoly = clipConvexPolygonWithLine(poly, this.paper.creaseP0, this.paper.creaseP1, false);
+      const { posPoly, negPoly, flatP0, flatP1 } = this.getSplitPolys(layer, this.paper.creaseP0, this.paper.creaseP1);
 
       const staticPoly = this.paper.movingSide === "positive" ? negPoly : posPoly;
       const movingPoly = this.paper.movingSide === "positive" ? posPoly : negPoly;
@@ -859,25 +913,11 @@ export class PaperSimulator {
         );
         mesh.userData.side = this.paper.movingSide === "positive" ? "negative" : "positive";
         mesh.userData.layerId = layerId;
-        mesh.castShadow = true;
-        mesh.receiveShadow = false;
-        mesh.position.z = zLift;
+        mesh.userData.isMoving = false;
+        mesh.userData.baseMatrix = baseMat;
+        mesh.matrixAutoUpdate = false;
         this.paperGroup.add(mesh);
         this.renderMeshes.push(mesh);
-        this.pickMeshes.push(mesh);
-
-        const edge = makeBoundaryEdgeFromPolygons([staticPoly], {
-          zOffset: 0.001 + zLift,
-          hideOnCreaseLine: {
-            p0: this.paper.creaseP0,
-            p1: this.paper.creaseP1,
-            epsilon: 1e-4,
-          },
-        });
-        if (edge) {
-          this.paperGroup.add(edge);
-          this.renderEdges.push(edge);
-        }
       }
 
       if (movingPoly.length >= 3) {
@@ -887,29 +927,11 @@ export class PaperSimulator {
         );
         mesh.userData.side = this.paper.movingSide;
         mesh.userData.layerId = layerId;
-        mesh.castShadow = true;
-        mesh.receiveShadow = false;
+        mesh.userData.isMoving = true;
+        mesh.userData.baseMatrix = baseMat;
         mesh.matrixAutoUpdate = false;
-        const zMat = new THREE.Matrix4().makeTranslation(0, 0, zLift + seamLift);
-        mesh.matrix.copy(new THREE.Matrix4().multiplyMatrices(zMat, foldMatrix));
-        mesh.matrixWorldNeedsUpdate = true;
         this.paperGroup.add(mesh);
         this.renderMeshes.push(mesh);
-        this.pickMeshes.push(mesh);
-
-        const edge = makeBoundaryEdgeFromPolygons([movingPoly], {
-          zOffset: 0.001 + zLift + seamLift,
-          hideOnCreaseLine: {
-            p0: this.paper.creaseP0,
-            p1: this.paper.creaseP1,
-            epsilon: 1e-4,
-          },
-          transformMatrix: foldMatrix,
-        });
-        if (edge) {
-          this.paperGroup.add(edge);
-          this.renderEdges.push(edge);
-        }
       }
     }
 
@@ -930,6 +952,38 @@ export class PaperSimulator {
     this.paperGroup.add(this.creaseLine);
 
     this.updateGuideVisibility();
+    this.updateMeshesTransform();
+  }
+
+  getFoldMatrix(op, angleDeg = op.targetAngleDeg) {
+    const axis = new THREE.Vector3(
+      op.creaseP1.x - op.creaseP0.x,
+      op.creaseP1.y - op.creaseP0.y,
+      0
+    );
+    if (axis.lengthSq() < 1e-10) return new THREE.Matrix4();
+    axis.normalize();
+    const sideSign = op.movingSide === "positive" ? 1 : -1;
+    const signedAngle = THREE.MathUtils.degToRad(angleDeg * sideSign);
+    const rot = new THREE.Matrix4().makeRotationAxis(axis, signedAngle);
+    const t1 = new THREE.Matrix4().makeTranslation(-op.creaseP0.x, -op.creaseP0.y, 0);
+    const t2 = new THREE.Matrix4().makeTranslation(op.creaseP0.x, op.creaseP0.y, 0);
+    return new THREE.Matrix4().multiplyMatrices(t2, rot).multiply(t1);
+  }
+
+  getBaseMatrixForLayer(layer) {
+    const m = new THREE.Matrix4();
+    if (!layer.foldHistory) return m;
+    
+    // Apply operations in forward order: oldest first, newest last.
+    for (let i = 0; i < layer.foldHistory.length; i++) {
+      const pastItem = layer.foldHistory[i];
+      if (pastItem.isMoving) {
+        const opMat = this.getFoldMatrix(pastItem.op);
+        m.premultiply(opMat);
+      }
+    }
+    return m;
   }
 
   disposePaperMeshes() {
@@ -944,7 +998,6 @@ export class PaperSimulator {
     }
     this.renderMeshes = [];
     this.renderEdges = [];
-    this.pickMeshes = [];
     this.creaseLine = null;
   }
 
@@ -982,6 +1035,24 @@ export class PaperSimulator {
     return nearDistPos <= nearDistNeg ? 1 : -1;
   }
 
+  getSplitPolys(layer, worldCreaseP0, worldCreaseP1) {
+      let flatP0 = worldCreaseP0.clone();
+      let flatP1 = worldCreaseP1.clone();
+      if (layer.foldHistory) {
+          for (let j = layer.foldHistory.length - 1; j >= 0; j--) {
+              const pastItem = layer.foldHistory[j];
+              if (pastItem.isMoving) {
+                  flatP0 = reflectPointAcrossLine(flatP0, pastItem.op.creaseP0, pastItem.op.creaseP1);
+                  flatP1 = reflectPointAcrossLine(flatP1, pastItem.op.creaseP0, pastItem.op.creaseP1);
+              }
+          }
+      }
+
+      const posPoly = clipConvexPolygonWithLine(layer.poly, flatP0, flatP1, true);
+      const negPoly = clipConvexPolygonWithLine(layer.poly, flatP0, flatP1, false);
+      return { posPoly, negPoly, flatP0, flatP1 };
+  }
+
   computeMovingSideCameraDistance(movingSide, allowedSign, sampleDeg, targetLayerIds = null) {
     const axis = new THREE.Vector3(
       this.paper.creaseP1.x - this.paper.creaseP0.x,
@@ -1007,14 +1078,16 @@ export class PaperSimulator {
       Array.isArray(targetLayerIds) && targetLayerIds.length > 0 ? new Set(targetLayerIds) : null;
     for (const layer of this.layers) {
       if (targetSet && !targetSet.has(layer.id)) continue;
-      const poly = layer.poly;
-      const posPoly = clipConvexPolygonWithLine(poly, this.paper.creaseP0, this.paper.creaseP1, true);
-      const negPoly = clipConvexPolygonWithLine(poly, this.paper.creaseP0, this.paper.creaseP1, false);
+      
+      const { posPoly, negPoly } = this.getSplitPolys(layer, this.paper.creaseP0, this.paper.creaseP1);
       const movingPoly = movingSide === "positive" ? posPoly : negPoly;
       if (!movingPoly || movingPoly.length < 3) continue;
 
+      const baseMat = this.getBaseMatrixForLayer(layer);
+      const finalMat = new THREE.Matrix4().multiplyMatrices(foldMatrix, baseMat);
+
       for (const p of movingPoly) {
-        local.set(p.x, p.y, 0).applyMatrix4(foldMatrix);
+        local.set(p.x, p.y, 0).applyMatrix4(finalMat);
         world.copy(local);
         this.paperGroup.localToWorld(world);
         sumDistance += world.distanceTo(this.camera.position);
@@ -1040,14 +1113,15 @@ export class PaperSimulator {
       movingSide: this.paper.movingSide,
       targetLayerId,
       targetLayerIds: targetLayerIds.slice(),
-      foldStrength: 1,
+      foldStrength: 1, // Store as completed fold
+      targetAngleDeg: this.paper.foldTargetAngleDeg, // Store angle to use for rendering physics model correctly
       timestamp: Date.now(),
     });
-    this.rebuildLayersFromOps();
+    this.layers = this.rebuildFlatLayersFromOps();
 
     this.publishFoldCommitted(targetLayerId, targetLayerIds);
     this.paper.hasUserCrease = false;
-    this.paper.foldAngleDeg = 0;
+    this.paper.foldTargetAngleDeg = 0;
     this.paper.foldTargetAngleDeg = 0;
     this.paper.activeTargetLayerId = null;
     this.paper.activeTargetLayerIds = null;
@@ -1060,15 +1134,23 @@ export class PaperSimulator {
     lastTargetLayerId = this.paper.activeTargetLayerId ?? null,
     lastTargetLayerIds = this.paper.activeTargetLayerIds ?? null
   ) {
-    const layerAreas = this.layers.map((layer) => polygonAreaAbs(layer.poly));
+    const projectedLayers = this.layers.map(layer => {
+      const mat = this.getBaseMatrixForLayer(layer);
+      return layer.poly.map(p => {
+        const v = new THREE.Vector3(p.x, p.y, 0).applyMatrix4(mat);
+        return { x: v.x, y: v.y };
+      });
+    });
+
+    const layerAreas = projectedLayers.map((poly) => polygonAreaAbs(poly));
     const totalArea = layerAreas.reduce((sum, area) => sum + area, 0);
-    const silhouette = computeLayerSilhouette(this.layers.map((layer) => layer.poly));
+    const silhouette = computeLayerSilhouette(projectedLayers);
 
     this.bus.publish(MSG.PAPER_FOLD_COMMITTED, {
       layerCount: this.layers.length,
       layerAreas,
       totalArea,
-      layers: this.layers.map((layer) => layer.poly.map((p) => ({ x: p.x, y: p.y }))),
+      layers: projectedLayers,
       silhouette,
       movingSide: this.paper.movingSide,
       lastTargetLayerId,
@@ -1090,65 +1172,50 @@ export class PaperSimulator {
     });
   }
 
-  rebuildLayersFromOps() {
-    let rebuilt = [{ id: this.baseLayerId, poly: this.basePolygon.map((p) => p.clone()) }];
-    for (const op of this.foldOps) {
-      rebuilt = this.applyFoldOpToLayers(rebuilt, op);
+  rebuildFlatLayersFromOps(ops = this.foldOps) {
+    let rebuilt = [{ id: this.baseLayerId, poly: this.basePolygon.map((p) => p.clone()), foldHistory: [] }];
+    for (const op of ops) {
+      op.flatLines = []; // Initialize array to hold flat-space lines for this op
+      const output = [];
+      const targetIds =
+        Array.isArray(op.targetLayerIds) && op.targetLayerIds.length > 0
+          ? new Set(op.targetLayerIds)
+          : new Set(op.targetLayerId ? [op.targetLayerId] : []);
+      
+      for (const layer of rebuilt) {
+        const poly = layer.poly;
+        if (!targetIds.has(layer.id)) {
+          output.push({ id: layer.id, poly: poly.map((p) => p.clone()), foldHistory: [...layer.foldHistory] });
+          continue;
+        }
+
+        // 역방향 변환: 현재 접힘선(op.crease)을 이 레이어의 평면(Flat) 공간으로 되돌립니다.
+        const { posPoly: pos, negPoly: neg, flatP0, flatP1 } = this.getSplitPolys(layer, op.creaseP0, op.creaseP1);
+        op.flatLines.push({ p0: flatP0, p1: flatP1 });
+
+        const moving = op.movingSide === "positive" ? pos : neg;
+        const fixed = op.movingSide === "positive" ? neg : pos;
+        
+        if (fixed.length >= 3) {
+          output.push({ 
+            id: `${layer.id}|${op.opId}|fixed`, 
+            poly: fixed.map((p) => p.clone()), 
+            foldHistory: [...layer.foldHistory, { op: op, isMoving: false }] 
+          });
+        }
+        if (moving.length >= 3) {
+          output.push({ 
+            id: `${layer.id}|${op.opId}|moving`, 
+            poly: moving.map((p) => p.clone()), 
+            foldHistory: [...layer.foldHistory, { op: op, isMoving: true }]
+          });
+        }
+      }
+      rebuilt = output;
     }
-    this.layers = rebuilt.filter(
-      (layer) => layer.poly.length >= 3 && polygonAreaAbs(layer.poly) > 1e-6
-    );
-    if (this.layers.length === 0) {
-      this.layers = [{ id: this.baseLayerId, poly: this.basePolygon.map((p) => p.clone()) }];
-    }
+    return rebuilt.filter((layer) => layer.poly.length >= 3 && polygonAreaAbs(layer.poly) > 1e-6);
   }
 
-  applyFoldOpToLayers(inputLayers, op) {
-    const output = [];
-    const strength = THREE.MathUtils.clamp(op.foldStrength ?? 1, 0, 1);
-    const targetIds =
-      Array.isArray(op.targetLayerIds) && op.targetLayerIds.length > 0
-        ? new Set(op.targetLayerIds)
-        : new Set(op.targetLayerId ? [op.targetLayerId] : []);
-    for (const layer of inputLayers) {
-      const poly = layer.poly;
-      if (!targetIds.has(layer.id)) {
-        output.push({
-          id: layer.id,
-          poly: poly.map((p) => p.clone()),
-        });
-        continue;
-      }
-
-      const pos = clipConvexPolygonWithLine(poly, op.creaseP0, op.creaseP1, true);
-      const neg = clipConvexPolygonWithLine(poly, op.creaseP0, op.creaseP1, false);
-      const moving = op.movingSide === "positive" ? pos : neg;
-      const fixed = op.movingSide === "positive" ? neg : pos;
-      const fixedId = `${layer.id}|${op.opId}|fixed`;
-      const movingId = `${layer.id}|${op.opId}|moving`;
-
-      if (fixed.length >= 3) {
-        output.push({
-          id: fixedId,
-          poly: fixed.map((p) => p.clone()),
-        });
-      }
-      if (moving.length >= 3) {
-        const folded = moving.map((p) => {
-          const reflected = reflectPointAcrossLine(p, op.creaseP0, op.creaseP1);
-          return new THREE.Vector2(
-            THREE.MathUtils.lerp(p.x, reflected.x, strength),
-            THREE.MathUtils.lerp(p.y, reflected.y, strength)
-          );
-        });
-        output.push({
-          id: movingId,
-          poly: folded,
-        });
-      }
-    }
-    return output;
-  }
 
   applyWingSpreadShaping() {
     if (this.foldOps.length === 0) {
@@ -1160,7 +1227,6 @@ export class PaperSimulator {
       if (Math.abs(this.paper.foldTargetAngleDeg) > 1) this.commitCurrentFoldToLayers();
       else {
         this.paper.hasUserCrease = false;
-        this.paper.foldAngleDeg = 0;
         this.paper.foldTargetAngleDeg = 0;
         this.paper.activeTargetLayerId = null;
         this.paper.activeTargetLayerIds = null;
@@ -1176,13 +1242,15 @@ export class PaperSimulator {
       this.bus.publish(MSG.UI_SET_HINT, { text: "날개 후보를 찾지 못해 최근 접기를 완만하게 펼칩니다." });
       const idx = this.foldOps.length - 1;
       this.foldOps[idx].foldStrength = Math.min(this.foldOps[idx].foldStrength, 0.84);
+      this.foldOps[idx].targetAngleDeg = this.foldOps[idx].targetAngleDeg * 0.84;
     } else {
       for (const idx of selected) {
         this.foldOps[idx].foldStrength = Math.min(this.foldOps[idx].foldStrength, targetStrength);
+        this.foldOps[idx].targetAngleDeg = this.foldOps[idx].targetAngleDeg * targetStrength;
       }
     }
 
-    this.rebuildLayersFromOps();
+    this.layers = this.rebuildFlatLayersFromOps();
     this.createPaperMeshes();
     this.publishFoldCommitted();
   }
@@ -1283,7 +1351,7 @@ export class PaperSimulator {
   }
 
   updateGuideVisibility() {
-    const folded = Math.abs(this.paper.foldAngleDeg) > 1.0;
+    const folded = Math.abs(this.paper.foldTargetAngleDeg) > 1.0;
     const showGuides = this.interaction.mode === "draw" && !folded;
     const showCrease = this.paper.hasUserCrease && !folded;
 
@@ -1335,6 +1403,10 @@ export class PaperSimulator {
       1;
     this.paper.foldTargetAngleDeg = sign * this.foldLimits.snapTargetAngle;
     this.interaction.autoSettling = true;
+    
+    if (this.interaction.selectedLayerId) {
+      this.updateMeshesTransform();
+    }
   }
 
   destroy() {

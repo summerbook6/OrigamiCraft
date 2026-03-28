@@ -55,7 +55,7 @@ export class AirplaneEvaluator {
       this.hasCompleted = true;
       this.bus.publish(MSG.AIRPLANE_COMPLETED, { score });
       this.bus.publish(MSG.UI_SET_HINT, {
-        text: "종이비행기 형태가 완성됐어요! 다음 접기로 날개를 더 다듬어보세요.",
+        text: "종이비행기 형태가 완성됐어요! 우측 상단 '날개 펴기'를 눌러 완성하세요.",
       });
     }
 
