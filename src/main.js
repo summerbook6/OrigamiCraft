@@ -5,8 +5,8 @@ import { CameraOrbitController } from "./modules/cameraOrbitController.js";
 import { PaperSimulator } from "./modules/paperSimulator.js";
 import { PaperPoseController } from "./modules/paperPoseController.js";
 import { FoldHistoryManager } from "./modules/foldHistoryManager.js";
-import { AirplaneEvaluator } from "./modules/airplaneEvaluator.js";
 import { SceneSystem } from "./modules/sceneSetup.js";
+import { TemplateManager } from "./templates/templateManager.js";
 
 if (window.__origamiCraftBootstrapped) {
   throw new Error("OrigamiCraft main was initialized more than once.");
@@ -20,6 +20,7 @@ const btnUndo = document.getElementById("btnUndo");
 const btnFlip = document.getElementById("btnFlip");
 const btnStand = document.getElementById("btnStand");
 const btnSpread = document.getElementById("btnSpread");
+const templateSelector = document.getElementById("templateSelector");
 
 const bus = new MessageBus();
 const sceneSystem = new SceneSystem({ canvas });
@@ -47,13 +48,38 @@ window.app.paperPose = paperPose;
 
 new FoldHistoryManager({ bus });
 
-new AirplaneEvaluator({
-  bus,
-  paperSize: {
-    width: paperSimulator.paper.width,
-    height: paperSimulator.paper.height,
-  },
+const templateManager = new TemplateManager({ bus, paperSimulator });
+window.app.templateManager = templateManager;
+
+let templateUi = {
+  spreadWingButton: false,
+  wingSpreadOnStandFlat: false,
+};
+
+bus.subscribe(MSG.TEMPLATE_CHANGED, ({ ui }) => {
+  if (ui) {
+    templateUi = {
+      spreadWingButton: !!ui.spreadWingButton,
+      wingSpreadOnStandFlat: !!ui.wingSpreadOnStandFlat,
+    };
+  }
+  if (btnSpread && !templateUi.spreadWingButton) {
+    btnSpread.style.display = "none";
+  }
 });
+
+bus.subscribe(MSG.APP_RESET_FOLD, () => {
+  if (btnSpread) btnSpread.style.display = "none";
+});
+
+templateManager.loadTemplate("airplane", { force: true });
+
+if (templateSelector) {
+  templateSelector.addEventListener("change", (e) => {
+    bus.publish(MSG.APP_RESET_FOLD);
+    templateManager.loadTemplate(e.target.value);
+  });
+}
 
 const clock = new THREE.Clock();
 
@@ -73,10 +99,14 @@ bus.subscribe(MSG.PAPER_POSE_CHANGED, ({ pose, reason }) => {
   const prevStanding = poseStanding;
   poseStanding = !!pose.isStanding;
   if (reason === "toFlat" || (prevStanding && !poseStanding)) {
-    bus.publish(MSG.PAPER_SHAPE_COMMAND, { action: "wing-spread" });
-    showHint("수평으로 복귀하고 날개를 살짝 펼쳤어요.", 3000);
+    if (templateUi.wingSpreadOnStandFlat) {
+      bus.publish(MSG.PAPER_SHAPE_COMMAND, { action: "wing-spread" });
+      showHint("수평으로 복귀하고 날개를 살짝 펼쳤어요.", 3000);
+    } else {
+      showHint("수평 작업면으로 돌아왔어요.", 2500);
+    }
   } else if (reason === "toStand") {
-    showHint("종이를 세웠습니다. 다시 누르면 수평 복귀 + 성형됩니다.", 3000);
+    showHint("종이를 세웠습니다. 다시 누르면 수평으로 돌아옵니다.", 3000);
   }
 });
 
@@ -96,7 +126,7 @@ btnStand?.addEventListener("click", onStandClick);
 btnSpread?.addEventListener("click", onSpreadClick);
 
 bus.subscribe(MSG.AIRPLANE_COMPLETED, () => {
-  if (btnSpread) {
+  if (btnSpread && templateUi.spreadWingButton) {
     btnSpread.style.display = "inline-block";
   }
 });
@@ -199,6 +229,7 @@ function onUndoClick() {
 }
 
 function onSpreadClick() {
+  if (!templateUi.spreadWingButton) return;
   markUserInteraction();
   bus.publish(MSG.PAPER_SHAPE_COMMAND, { action: "wing-spread" });
   if (btnSpread) {

@@ -135,6 +135,43 @@ body,
   box-shadow: 0 0 8px rgba(130, 176, 255, 0.65);
 }
 
+#topActions {
+  position: absolute;
+  top: 16px;
+  left: 16px;
+  z-index: 100;
+  display: flex;
+  gap: 8px;
+}
+
+#topActions select {
+  font-family: inherit;
+  font-size: 0.9rem;
+  padding: 8px 12px;
+  border: none;
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.9);
+  color: #333;
+  cursor: pointer;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.08);
+  backdrop-filter: blur(4px);
+  -webkit-backdrop-filter: blur(4px);
+  outline: none;
+  font-weight: 600;
+  transition: all 0.2s ease;
+}
+
+#topActions select:hover {
+  background: white;
+  box-shadow: 0 6px 16px rgba(0, 0, 0, 0.12);
+  transform: translateY(-1px);
+}
+
+#topActions select:focus {
+  border: 1px solid #2f66ff;
+  outline: none;
+}
+
 #bottomActions {
   position: fixed;
   left: 50%;

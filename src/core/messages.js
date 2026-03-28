@@ -11,5 +11,7 @@ export const MSG = Object.freeze({
   PAPER_FOLD_COMMITTED: "paper/fold-committed",
   AIRPLANE_EVAL_UPDATED: "airplane/eval-updated",
   AIRPLANE_COMPLETED: "airplane/completed",
+  /** { templateId, name, ui: { spreadWingButton, wingSpreadOnStandFlat } } */
+  TEMPLATE_CHANGED: "app/template-changed",
   UI_SET_HINT: "ui/set-hint",
 });

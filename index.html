@@ -47,6 +47,14 @@
           <span class="control-text">종이 접기</span>
         </div>
       </div>
+      <div id="topActions" aria-label="템플릿 선택">
+        <label for="templateSelector" style="display:none;">접기 템플릿 선택:</label>
+        <select id="templateSelector">
+          <option value="airplane">비행기 접기</option>
+          <option value="flower">꽃 접기</option>
+        </select>
+      </div>
+      
       <div id="bottomActions" aria-label="빠른 조작 버튼">
         <button id="btnSpread" type="button" style="display: none; background: #ff5722; color: white;">날개 펴기</button>
         <button id="btnUndo" type="button">되돌리기</button>
@@ -56,6 +64,6 @@
       <canvas id="scene"></canvas>
     </div>
 
-    <script type="module" src="./app.js?v=32"></script>
+    <script type="module" src="./app.js?v=34"></script>
   </body>
 </html>
