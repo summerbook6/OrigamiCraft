@@ -1236,7 +1236,7 @@ export class PaperSimulator {
       }
     }
 
-    const targetStrength = 0.78;
+    const targetStrength = 0.5; // 펼침 강도 (수평에 가깝게)
     const selected = this.pickWingFoldOpIndices();
     if (selected.length === 0) {
       this.bus.publish(MSG.UI_SET_HINT, { text: "날개 후보를 찾지 못해 최근 접기를 완만하게 펼칩니다." });
@@ -1253,6 +1253,7 @@ export class PaperSimulator {
     this.layers = this.rebuildFlatLayersFromOps();
     this.createPaperMeshes();
     this.publishFoldCommitted();
+    this.bus.publish(MSG.UI_SET_HINT, { text: "날개를 펼쳐 비행기 형태를 다듬었습니다." });
   }
 
   pickWingFoldOpIndices() {
